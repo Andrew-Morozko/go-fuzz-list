@@ -1,0 +1,144 @@
+name: 'Go list fuzz targets'
+author: 'Andrew Morozko'
+description: |
+  Searches for the fuzz targets matching the given regexp in the given package path.
+  Filters out the fuzz targets that are mentioned in the open issues with the title starting with "Fuzzer `FuzzFunctionName` failed" and the body containing the package name.
+
+  It is intended to be used in conjunction with the `Go fuzz` action, see github.com/Andrew-Morozko/go-fuzz-example.
+
+  Expects the project to be checked out and to have golang installed.
+  Requires the `issues: read` permission to fetch the open issues.
+  Tested on `ubuntu-latest` runner.
+
+branding:
+  icon: 'search'
+  color: 'orange'
+
+inputs:
+  func-regexp:
+    description: 'Regexp to match the fuzz func'
+    required: false
+    default: '^Fuzz'
+  package-path:
+    description: 'Path to search for fuzz targets'
+    required: false
+    default: './...'
+  tags:
+    description: 'Run search for fuzz targets with these tags'
+    required: false
+    default: ''
+
+outputs:
+  targets:
+    description: |
+      JSON list of fuzz targets, ie:
+      [
+        {
+          "package": "github.com/owner/repo/pkg/somepackage",
+          "func": "FuzzFunc",
+          "packageRelative": "pkg/somepackage"
+        },
+        {
+          "package": "github.com/owner/repo",
+          "func": "FuzzFunc2",
+          "packageRelative": ""
+        }
+      ]
+    value: ${{ steps.list-targets.outputs.result }}
+runs:
+  using: "composite"
+  steps:
+    - name: List fuzz targets
+      id: list-targets
+      uses: actions/github-script@v7
+      env:
+        FUNC_REGEXP: ${{ inputs.func-regexp }}
+        PACKAGE_PATH: ${{ inputs.package-path }}
+        TAGS: ${{ inputs.tags }}
+      with:
+        script: |
+          const stream = require("node:stream");
+
+          const titleRe = /^Fuzzer\s+([^ ]+)\s+failed/;
+          const bodyRe = /^Package:\s+`([^`]+)`/m;
+
+          async function getIgnoreList() {
+            let issuesIter = github.paginate.iterator(github.rest.issues.listForRepo, {
+              ...context.repo,
+              state: "open",
+            });
+            let ignoreIssues = [];
+            for await (const page of issuesIter) {
+              if (page.status !== 200) {
+                throw new Error(`Failed to fetch issues: ${JSON.stringify(page)}`);
+              }
+              for (const issue of page.data) {
+                if (!issue.body) {
+                  continue;
+                }
+                const titleMatch = titleRe.exec(issue.title);
+                if (!titleMatch) {
+                  continue;
+                }
+                const bodyMatch = bodyRe.exec(issue.body);
+                if (!bodyMatch) {
+                  continue;
+                }
+                ignoreIssues.push(`${bodyMatch[1]}/${titleMatch[1]}`);
+              }
+            }
+            return ignoreIssues;
+          }
+
+          async function listFuzzTargets() {
+            let targets = new Set();
+            const args = ["test", "-list", process.env.FUNC_REGEXP, "-json"];
+            if (process.env.TAGS) {
+              args.push("-tags", process.env.TAGS);
+            }
+            args.push(process.env.PACKAGE_PATH);
+            await exec.exec("go", args, {
+              listeners: {
+                stdline: (line) => {
+                  let obj = JSON.parse(line);
+                  if (
+                    typeof obj !== "object" ||
+                    obj?.Action !== "output" ||
+                    typeof obj?.Output !== "string" ||
+                    typeof obj?.Package !== "string"
+                  ) {
+                    return;
+                  }
+                  const out = obj.Output;
+                  process.stdout.write(out);
+                  if (out.startsWith("Fuzz")) {
+                    targets.add(`${obj.Package.trim()}/${out.trimEnd()}`);
+                  }
+                },
+              },
+              outStream: new stream.PassThrough(),
+            });
+            return targets;
+          }
+
+          const commonPrefix = `github.com/${process.env.GITHUB_REPOSITORY}`;
+
+          const [ignoreList, fuzzTargets] = await Promise.all([getIgnoreList(), listFuzzTargets()]);
+          ignoreList.forEach((el) => fuzzTargets.delete(el));
+          const res = [...fuzzTargets]
+            .sort((a, b) => a.localeCompare(b))
+            .map((el) => {
+              const idx = el.lastIndexOf("/");
+              const package = el.slice(0, idx);
+              const func = el.slice(idx + 1);
+              let packageRelative = package;
+              if (package.startsWith(commonPrefix)) {
+                packageRelative = package.slice(commonPrefix.length);
+                if (packageRelative.startsWith("/")) {
+                  packageRelative = packageRelative.slice(1);
+                }
+              }
+              return { package, func, packageRelative };
+            });
+          core.info(`Found ${res.length} fuzz targets`);
+          return res
