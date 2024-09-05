@@ -1,14 +1,6 @@
 name: 'Go list fuzz targets'
 author: 'Andrew Morozko'
-description: |
-  Searches for the fuzz targets matching the given regexp in the given package path.
-  Filters out the fuzz targets that are mentioned in the open issues with the title starting with "Fuzzer `FuzzFunctionName` failed" and the body containing the package name.
-
-  It is intended to be used in conjunction with the `Go fuzz` action, see github.com/Andrew-Morozko/go-fuzz-example.
-
-  Expects the project to be checked out and to have golang installed.
-  Requires the `issues: read` permission to fetch the open issues.
-  Tested on `ubuntu-latest` runner.
+description: Searches for the fuzz tests
 
 branding:
   icon: 'search'
